@@ -28,6 +28,7 @@
 #include "format.h"
 #include "methods.h"
 #include "tcp.h"
+#include "udp.h"
 #include "rate.h"
 
 /* Function declarations */
@@ -295,7 +296,7 @@ void change_user(char *name) {
 
 void dump_buf(const unsigned char * block, unsigned int size) {
    unsigned int n = size, i;
-   if (n > 100) n = 100;
+   if (n > 300) n = 300;
    printf("--> ");
    for (i = 0; i < n; i++) {
       printf("%02x ", block[i]);
@@ -305,6 +306,177 @@ void dump_buf(const unsigned char * block, unsigned int size) {
       printf("%c", block[i]);
    }
    printf("\n");
+}
+
+int read_domain_string(char * data, char * target) {
+   int i = 0, j = 0;
+   int x = data[i];
+   while (x > 0) {
+      i ++;
+      while (x > 0) {
+         target[j++] = data[i++];
+         x --;
+      }
+      target[j++] = '.';
+      x = data[i];
+   }
+   if (x < 0) return 0;
+   target[j-1] = 0;
+   return i + 1;
+}
+
+int check_dns_packet(unsigned char * data, int size) {
+   if (size < 12) return 0;
+   unsigned int
+      ID = data[0] * 256 + data[1],
+      QR = (0x80 & data[2]) != 0,
+      OPCODE = (0x78 & data[2]) >> 3,
+      AA = (0x01 & data[2]) != 0,
+      QDCOUNT = data[4] * 256 + data[5],
+      ANCOUNT = data[6] * 256 + data[7],
+      NSCOUNT = data[8] * 256 + data[9],
+      ARCOUNT = data[10] * 256 + data[11],
+      TYPE = 0, CLASS = 0, TTL = 0, RDLEN = 0;
+   static char host[1024] = {0}, method[200] = {0}, alias[2048] = {0}, tmp[512] = {0};
+   int i = 12, j = 0, k = 0, k0 = 0 ;
+   if (!QR || OPCODE || !AA || ANCOUNT == 0) return 0; // || (0xff & data[2]) != 0x81 || (0xff & data[3]) != 0x80) return 0;
+   j = read_domain_string(data+i, host);
+   if (j == 0) return 0;
+   i += j;
+   if (i >= size) return 0;
+   i += 4; // skip 4B unknown
+   // method, host, status-code
+   for (j = 0; j < ANCOUNT; j ++) {
+      i += 2; // skip 2B unknown
+      TYPE = data[i] * 256 + data[i+1]; i += 2;
+      CLASS = data[i] * 256 + data[i+1]; i += 2;
+      i += 4; // skip TTL
+      RDLEN = data[i] * 256 + data[i+1]; i += 2;
+      switch (TYPE) {
+      case 0x01:
+         if (RDLEN != 4) { i += RDLEN; break; }
+         // ipv4
+         k = snprintf(alias + k0, 2048 - k0, "%u.%u.%u.%u;", data[i+0], data[i+1], data[i+2], data[i+3]);
+         k0 += k;
+         i += RDLEN;
+         break;
+      case 0x05:
+         k = read_domain_string(data+i, tmp);
+         k = snprintf(alias + k0, 2048 - k0, "%s;", tmp);
+         k0 += k;
+         i += RDLEN;
+         break;
+      default: break;
+      }
+   }
+   insert_value("status-code", alias);
+   insert_value("host", host);
+   // insert_value("method", method);
+   return 1;
+}
+
+void parse_udp_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pkt) {
+   struct tm *pkt_time;
+   char *header_line, *req_value;
+   char saddr[INET6_ADDRSTRLEN], daddr[INET6_ADDRSTRLEN];
+   char sport[PORTSTRLEN], dport[PORTSTRLEN];
+   char ts[MAX_TIME_LEN], fmt[MAX_TIME_LEN];
+   int is_request = 0, is_response = 0;
+   unsigned int eth_type = 0, offset;
+
+   const struct eth_header *eth;
+   const struct ip_header *ip;
+   const struct ip6_header *ip6;
+   const struct udp_header *udp;
+   const char *data;
+   int size_ip, size_tcp, size_data, family;
+
+   /* Check the ethernet type and insert a VLAN offset if necessary */
+   eth = (struct eth_header *) pkt;
+   eth_type = ntohs(eth->ether_type);
+   if (eth_type == ETHER_TYPE_VLAN) {
+           offset = link_offset + 4;
+   } else {
+           offset = link_offset;
+   }
+
+   offset += eth_skip_bits;
+
+   /* Position pointers within packet stream and do sanity checks */
+   ip = (struct ip_header *) (pkt + offset);
+   ip6 = (struct ip6_header *) (pkt + offset);
+
+   switch (IP_V(ip)) {
+           case 4: family = AF_INET; break;
+           case 6: family = AF_INET6; break;
+           default: return;
+   }
+
+   if (family == AF_INET) {
+           size_ip = IP_HL(ip) * 4;
+           if (size_ip < 20) return;
+           if (ip->ip_p != IPPROTO_UDP) return;
+   } else { /* AF_INET6 */
+           size_ip = sizeof(struct ip6_header);
+           if (ip6->ip6_nh != IPPROTO_TCP)
+                   size_ip = process_ip6_nh(pkt, size_ip, header->caplen, offset);
+           if (size_ip < 40) return;
+   }
+
+   udp = (struct udp_header *) (pkt + offset + size_ip);
+   // size_tcp = TH_OFF(tcp) * 4;
+   // if (size_tcp < 20) return;
+// printf("what??? %u\n", size_tcp);
+
+   data = (char *) (pkt + offset + size_ip + 8);
+   size_data = (header->caplen - (offset + size_ip + 8));
+   if (size_data <= 0) return;
+   if (!check_dns_packet(data, size_data)) return;
+// printf("what??? data size: %u\n", size_data);
+//if (debug_dump) {
+//   dump_buf(data, size_data);
+//}
+        /* Grab source/destination IP addresses */
+        if (family == AF_INET) {
+                inet_ntop(family, &ip->ip_src, saddr, sizeof(saddr));
+                inet_ntop(family, &ip->ip_dst, daddr, sizeof(daddr));
+        } else { /* AF_INET6 */
+                inet_ntop(family, &ip6->ip_src, saddr, sizeof(saddr));
+                inet_ntop(family, &ip6->ip_dst, daddr, sizeof(daddr));
+        }
+        insert_value("source-ip", saddr);
+        insert_value("dest-ip", daddr);
+
+        /* Grab source/destination ports */
+        snprintf(sport, PORTSTRLEN, "%d", ntohs(udp->source));
+        snprintf(dport, PORTSTRLEN, "%d", ntohs(udp->desc));
+        insert_value("source-port", sport);
+        insert_value("dest-port", dport);
+
+        /* Extract packet capture time */
+        pkt_time = localtime((time_t *) &header->ts.tv_sec);
+        strftime(fmt, sizeof(fmt), "%Y-%m-%d %H:%M:%S.%%03u", pkt_time);
+        snprintf(ts, sizeof(ts), fmt, header->ts.tv_usec / 1000);
+        insert_value("timestamp", ts);
+
+        insert_value("type", "udp");
+
+        if (rate_stats) {
+                update_host_stats(get_value("host"), header->ts.tv_sec);
+                clear_values();
+        } else {
+                print_format_values();
+        }
+
+        if (dumpfile)
+                pcap_dump((unsigned char *) dumpfile, header, pkt);
+
+        num_parsed++;
+        if (parse_count && (num_parsed >= parse_count))
+                pcap_breakloop(pcap_hnd);
+
+        return;
+
 }
 
 /* Process each packet that passes the capture filter */
@@ -348,7 +520,7 @@ void parse_http_packet(u_char *args, const struct pcap_pkthdr *header, const u_c
         if (family == AF_INET) {
                 size_ip = IP_HL(ip) * 4;
                 if (size_ip < 20) return;
-                if (ip->ip_p != IPPROTO_TCP) return;
+                if (ip->ip_p != IPPROTO_TCP) {parse_udp_packet(args, header, pkt);return;}
         } else { /* AF_INET6 */
                 size_ip = sizeof(struct ip6_header);
                 if (ip6->ip6_nh != IPPROTO_TCP)
@@ -426,6 +598,7 @@ if (is_response || is_request) {
         snprintf(ts, sizeof(ts), fmt, header->ts.tv_usec / 1000);
         insert_value("timestamp", ts);
 
+        insert_value("type", "tcp");
         if (rate_stats) {
                 update_host_stats(get_value("host"), header->ts.tv_sec);
                 clear_values();
