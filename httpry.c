@@ -62,6 +62,7 @@ static char *new_user = NULL;
 static char *format_str = NULL;
 static char *methods_str = NULL;
 static char *use_dumpfile = NULL;
+static int debug_dump = 0;
 static int rate_stats = 0;
 static int rate_interval = DEFAULT_RATE_INTERVAL;
 static int rate_threshold = DEFAULT_RATE_THRESHOLD;
@@ -292,6 +293,20 @@ void change_user(char *name) {
         return;
 }
 
+void dump_buf(const unsigned char * block, unsigned int size) {
+   unsigned int n = size, i;
+   if (n > 100) n = 100;
+   printf("--> ");
+   for (i = 0; i < n; i++) {
+      printf("%02x ", block[i]);
+   }
+   printf("\n --> ");
+   for (i = 0; i < n; i++) {
+      printf("%c", block[i]);
+   }
+   printf("\n");
+}
+
 /* Process each packet that passes the capture filter */
 void parse_http_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pkt) {
         struct tm *pkt_time;
@@ -344,10 +359,15 @@ void parse_http_packet(u_char *args, const struct pcap_pkthdr *header, const u_c
         tcp = (struct tcp_header *) (pkt + offset + size_ip);
         size_tcp = TH_OFF(tcp) * 4;
         if (size_tcp < 20) return;
+// printf("what??? %u\n", size_tcp);
 
         data = (char *) (pkt + offset + size_ip + size_tcp);
         size_data = (header->caplen - (offset + size_ip + size_tcp));
         if (size_data <= 0) return;
+// printf("what??? data size: %u\n", size_data);
+if (debug_dump) {
+   dump_buf(data, size_data);
+}
 
         /* Check if we appear to have a valid request or response */
         if (is_request_method(data)) {
@@ -355,7 +375,7 @@ void parse_http_packet(u_char *args, const struct pcap_pkthdr *header, const u_c
         } else if (strncmp(data, HTTP_STRING, strlen(HTTP_STRING)) == 0) {
                 is_response = 1;
         } else {
-                return;
+                // return;
         }
 
         /* Copy packet data to editable buffer that was created in main() */
@@ -363,6 +383,7 @@ void parse_http_packet(u_char *args, const struct pcap_pkthdr *header, const u_c
         memcpy(buf, data, size_data);
         buf[size_data] = '\0';
 
+if (is_response || is_request) {
         /* Parse header line, bail if malformed */
         if ((header_line = parse_header_line(buf)) == NULL) return;
 
@@ -380,6 +401,7 @@ void parse_http_packet(u_char *args, const struct pcap_pkthdr *header, const u_c
 
                 insert_value(header_line, req_value);
         }
+}
 
         /* Grab source/destination IP addresses */
         if (family == AF_INET) {
@@ -678,9 +700,11 @@ int main(int argc, char **argv) {
 
         signal(SIGHUP, &handle_signal);
         signal(SIGINT, &handle_signal);
+        // make sure stdout flush automatically
+        setvbuf(stdout, NULL, _IONBF, 0);
 
         /* Process command line arguments */
-        while ((opt = getopt(argc, argv, "b:df:Fhpqi:l:m:n:o:P:r:st:u:S:")) != -1) {
+        while ((opt = getopt(argc, argv, "b:df:Fhpqi:l:m:n:o:P:r:st:u:S:D")) != -1) {
                 switch (opt) {
                         case 'b': use_dumpfile = optarg; break;
                         case 'd': daemon_mode = 1; use_syslog = 1; break;
@@ -700,6 +724,7 @@ int main(int argc, char **argv) {
                         case 't': rate_interval = atoi(optarg); break;
                         case 'u': new_user = optarg; break;
                         case 'S': eth_skip_bits = atoi(optarg); break;
+                        case 'D': debug_dump = 1; break;
                         default: display_usage();
                 }
         }

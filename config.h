@@ -17,11 +17,12 @@
 
 /* Default packet capture filter; must be a standard libpcap style filter
    *** Can be overridden */
-#define DEFAULT_CAPFILTER "tcp port 80 or 8080"
+// #define DEFAULT_CAPFILTER "tcp port 80 or 8080"
+#define DEFAULT_CAPFILTER ""
 
 /* Default output format string; see doc/format-string for more information
    *** Can be overridden with -f */
-#define DEFAULT_FORMAT "timestamp,source-ip,dest-ip,direction,method,host,request-uri,http-version,status-code,reason-phrase"
+#define DEFAULT_FORMAT "timestamp,source-ip,source-port,dest-ip,dest-port,method,host,request-uri,http-version,status-code,reason-phrase"
 
 /* Default format string for rate statistics mode; should never change! */
 #define RATE_FORMAT "host"

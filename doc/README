@@ -174,3 +174,6 @@ simply searches the start of each packet for HTTP data and ignores the packet
 if it does not find valid data. HTTP packets that are fragmented within the
 request/response line will be parsed to the end of the packet and any header
 data present in subsequent packets will not be parsed.
+
+--{ Additional Notes }--
+- CentOS 5 -> require libpcap <1.8
